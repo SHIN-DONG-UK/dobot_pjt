@@ -1,4 +1,3 @@
-import socket
 import threading
 import rclpy
 from rclpy.node import Node
@@ -6,6 +5,7 @@ import cv2
 import numpy as np
 import pyrealsense2 as rs
 from sensor_msgs.msg import Image
+from std_msgs.msg import String
 from cv_bridge import CvBridge
 import torch
 import time
@@ -44,7 +44,6 @@ class DetectPanelNode(Node):
 
         self.init_model()
         self.init_camera()
-        self.init_socket()
         self.init_ros()
 
     def init_model(self):
@@ -59,50 +58,12 @@ class DetectPanelNode(Node):
         config.enable_stream(rs.stream.color, *Config.CAMERA_RESOLUTION, rs.format.bgr8, Config.CAMERA_FPS)
         self.pipeline.start(config)
 
-    def init_socket(self):
-        """소켓 서버 초기화"""
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_socket.bind((Config.SOCKET_HOST, Config.SOCKET_PORT))
-        self.server_socket.listen(5)
-        self.get_logger().info(f'Socket server listening on port {Config.SOCKET_PORT}')
-        self.client_thread = threading.Thread(target=self.accept_clients)
-        self.client_thread.daemon = True
-        self.client_thread.start()
-
     def init_ros(self):
         """ROS2 노드 초기화"""
         self.bridge = CvBridge()
         self.image_publisher = self.create_publisher(Image, 'detection_image', 10)
+        self.detected_publisher = self.create_publisher(String, 'detected_result', 10)
         self.timer = self.create_timer(0.1, self.timer_callback)
-
-    def accept_clients(self):
-        """클라이언트 연결 대기 및 관리"""
-        while True:
-            try:
-                client_socket, addr = self.server_socket.accept()
-                with self.clients_lock:
-                    self.client_sockets.append(client_socket)
-                self.get_logger().info(f'Client connected from {addr}')
-            except Exception as e:
-                self.get_logger().error(f'Error accepting client: {str(e)}')
-                break
-
-    def send_command(self, command):
-        """모든 클라이언트로 명령 전송"""
-        with self.clients_lock:
-            disconnected_clients = []
-            for client_socket in self.client_sockets:
-                try:
-                    client_socket.sendall(command.encode('utf-8') + b'\n')
-                except (BrokenPipeError, ConnectionResetError):
-                    disconnected_clients.append(client_socket)
-                    
-            # 연결이 끊긴 클라이언트 제거
-            for client_socket in disconnected_clients:
-                self.client_sockets.remove(client_socket)
-                client_socket.close()
-                self.get_logger().info('Client disconnected')
 
     def get_center_color(self, image):
         """이미지 중심 영역의 평균 색상 반환"""
@@ -157,6 +118,7 @@ class DetectPanelNode(Node):
         return color_image
 
     def handle_detection(self, detection_results):
+        rst = '0'
         """
         탐지 결과를 처리하여 명령 전송
         - 1초 이상 객체가 유지되었을 경우 명령 전송
@@ -170,26 +132,30 @@ class DetectPanelNode(Node):
             if elapsed_time >= self.detection_duration_threshold:
                 # 객체가 1초 이상 유지된 경우
                 if not self.object_detected:
-                    self.send_command('1')  # 모터 실행
+                    #self.send_command('1')  # 모터 실행
                     print("Object detected for 1 second: Starting motor")
                     self.object_detected = True
 
+                back_cnt = 0
+                board_cnt = 0
                 for label, _, _, _, _, _ in detection_results:
-                    if label == 'back_panel' and self.last_command != 'BACK_PANEL':
-                        self.send_command('3')  # 서보모터 왼쪽
-                        self.last_command = 'BACK_PANEL'
-                        print("Back panel detected for 1 second: Moving servo to left")
-                    elif label == 'board_panel' and self.last_command != 'BOARD_PANEL':
-                        self.send_command('5')  # 서보모터 오른쪽
-                        self.last_command = 'BOARD_PANEL'
-                        print("Board panel detected for 1 second: Moving servo to right")
+                    if label == 'back_panel':
+                        back_cnt += 1
+                    elif label == 'board_panel':
+                        board_cnt += 1
+                if back_cnt > board_cnt:
+                    rst = '3'
+                else:
+                    rst = '5'
         else:  # 감지된 오브젝트가 없을 경우
             self.detection_start_time = None  # 감지 시간 초기화
             if self.object_detected:
-                self.send_command('2')  # 모터 정지
+                rst = '2'
+                #self.send_command('2')  # 모터 정지
                 print("No object detected: Stopping motor")
                 self.object_detected = False
                 self.last_command = None
+        return rst
 
     def timer_callback(self):
         """주기적으로 호출: 프레임 처리, 시각화 및 명령 전송"""
@@ -202,14 +168,16 @@ class DetectPanelNode(Node):
         detection_results = self.process_frame(color_image)
 
         # 탐지 결과에 따른 명령 처리
-        self.handle_detection(detection_results)
+        conveyor_message = String()
+        conveyor_message.data = self.handle_detection(detection_results)
 
         # 탐지 결과를 이미지에 시각화
         annotated_image = self.annotate_frame(color_image, detection_results)
 
-        # 이미지 퍼블리시
+        # 퍼블리시
         ros_image_message = self.bridge.cv2_to_imgmsg(annotated_image, encoding='bgr8')
         self.image_publisher.publish(ros_image_message)
+        self.detected_publisher.publish(conveyor_message)
 
     def destroy_node(self):
         """리소스 해제"""
