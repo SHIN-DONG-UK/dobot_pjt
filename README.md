@@ -1,5 +1,7 @@
 # 스마트 TV 제조 공정 모사 프로젝트
 
+<img src="./resource/images/시연.gif">
+
 ## 과제 개요
 - 자동화된 스마트 TV 생산 라인을 모사한다.
 - **pick and place** - Dobot을 활용해 부품을 컨베이어 벨트 위에 올려놓는다.
@@ -8,3 +10,6 @@
 
 ## 구조도
 <img src="./resource/images/구조도.png">
+
+## 주요 구현 사항
+### 1. Dobot Client
